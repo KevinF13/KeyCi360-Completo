@@ -298,10 +298,21 @@ def get_companies():
 def get_people():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
-            SELECT p.id, p.cedula, p.nombre, p.company_id
+            SELECT 
+                p.id,
+                p.cedula,
+                p.nombre,
+                p.cargo,
+                p.area,
+                p.email,
+                p.company_id,
+                c.nombre AS company_nombre,
+                p.status_id,
+                s.nombre AS status_nombre
             FROM people p
+            JOIN companies c ON p.company_id = c.id
             JOIN statuses s ON p.status_id = s.id
-            WHERE s.nombre = 'ACTIVO'
+            WHERE s.nombre <> 'ELIMINADO'
             ORDER BY p.nombre
         """)
         return cur.fetchall()
@@ -484,3 +495,76 @@ def unassign_full(person_id: int):
             """, (accesorios,))
  
         return {"mensaje": "Equipo completo desasignado"}
+    
+# =========================
+@router.put("/people/{id}")
+def update_person(id: int, data: dict):
+    with get_conn() as conn, conn.cursor() as cur:
+        # Validar existencia
+        cur.execute("SELECT id FROM people WHERE id = %s", (id,))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Persona no encontrada")
+
+        # Update
+        cur.execute("""
+            UPDATE people
+            SET cedula = %s,
+                nombre = %s,
+                cargo = %s,
+                area = %s,
+                email = %s,
+                company_id = %s,
+                status_id = %s
+            WHERE id = %s
+        """, (
+            data["cedula"],
+            data["nombre"],
+            data["cargo"],
+            data["area"],
+            data["email"],
+            data["company_id"],
+            data["status_id"],
+            id
+        ))
+
+        return {"message": f"Persona {id} actualizada correctamente"}
+    
+
+# =========================
+@router.put("/hardware/{id}")
+def update_hardware(id: int, data: dict):
+    with get_conn() as conn, conn.cursor() as cur:
+        # Validar existencia
+        cur.execute("SELECT id FROM hardware_specs WHERE id = %s", (id,))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Hardware no encontrado")
+
+        # Update
+        cur.execute("""
+            UPDATE hardware_specs
+            SET tipo_equipo = %s,
+                marca = %s,
+                modelo = %s,
+                procesador = %s,
+                ram_gb = %s,
+                almacenamiento = %s,
+                sistema_operativo = %s,
+                pantalla = %s,
+                otros = %s,
+                status_id = %s
+            WHERE id = %s
+        """, (
+            data["tipo_equipo"],
+            data["marca"],
+            data["modelo"],
+            data["procesador"],
+            data["ram_gb"],
+            data["almacenamiento"],
+            data["sistema_operativo"],
+            data.get("pantalla"),
+            data.get("otros"),
+            data["status_id"],
+            id
+        ))
+
+        return {"message": f"Hardware {id} actualizado correctamente"}
