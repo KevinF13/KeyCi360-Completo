@@ -1,10 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from psycopg2.extras import RealDictCursor
 from datetime import date
-import psycopg2, os
- 
+import psycopg2
+import os
+
 router = APIRouter(prefix="/equipos", tags=["Equipos"])
- 
+
+
 def get_conn():
     return psycopg2.connect(
         host=os.getenv("DB_HOST"),
@@ -13,63 +15,193 @@ def get_conn():
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
     )
- 
+
+
 # =========================
 # CREACIONES
 # =========================
 @router.post("/companies")
 def create_company(data: dict):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO companies (nombre,status_id)
-            VALUES (%s,(SELECT id FROM statuses WHERE nombre='ACTIVO'))
-            RETURNING id
-        """, (data["nombre"],))
-        return {"company_id": cur.fetchone()[0]}
- 
+        try:
+            cur.execute("""
+                INSERT INTO companies (nombre, status_id)
+                VALUES (%s, (SELECT id FROM statuses WHERE nombre = 'ACTIVO'))
+                RETURNING id
+            """, (data["nombre"],))
+            company_id = cur.fetchone()[0]
+            conn.commit()
+            return {"company_id": company_id}
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al crear compañía: {str(e)}")
+
+
 @router.post("/people")
 def create_person(data: dict):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO people
-            (cedula,nombre,cargo,area,email,company_id,status_id)
-            VALUES (%s,%s,%s,%s,%s,%s,
-                (SELECT id FROM statuses WHERE nombre='ACTIVO'))
-            RETURNING id
-        """, (
-            data["cedula"], data["nombre"], data["cargo"],
-            data["area"], data["email"], data["company_id"]
-        ))
-        return {"person_id": cur.fetchone()[0]}
- 
+        try:
+            cur.execute("""
+                INSERT INTO people
+                (cedula, nombre, cargo, area, email, company_id, status_id)
+                VALUES (%s, %s, %s, %s, %s, %s,
+                        (SELECT id FROM statuses WHERE nombre = 'ACTIVO'))
+                RETURNING id
+            """, (
+                data["cedula"],
+                data["nombre"],
+                data["cargo"],
+                data["area"],
+                data["email"],
+                data["company_id"]
+            ))
+            person_id = cur.fetchone()[0]
+            conn.commit()
+            return {"person_id": person_id}
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al crear persona: {str(e)}")
+
+
 @router.post("/hardware")
 def create_hardware(data: dict):
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO hardware_specs
-            (tipo_equipo,marca,modelo,procesador,ram_gb,
-             almacenamiento,sistema_operativo,status_id)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,
-                (SELECT id FROM statuses WHERE nombre='ACTIVO'))
-            RETURNING id
-        """, (
-            data["tipo_equipo"], data["marca"], data["modelo"],
-            data["procesador"], data["ram_gb"],
-            data["almacenamiento"], data["sistema_operativo"]
-        ))
-        return {"hardware_id": cur.fetchone()[0]}
- 
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, status_id
+                FROM hardware_specs
+                WHERE tipo_equipo = %s
+                  AND marca = %s
+                  AND modelo = %s
+                  AND procesador = %s
+                  AND ram_gb = %s
+                  AND almacenamiento = %s
+                  AND sistema_operativo = %s
+                LIMIT 1
+            """, (
+                data["tipo_equipo"],
+                data["marca"],
+                data["modelo"],
+                data["procesador"],
+                data["ram_gb"],
+                data["almacenamiento"],
+                data["sistema_operativo"]
+            ))
+
+            existing = cur.fetchone()
+
+            if existing:
+                hardware_id, status_id = existing
+
+                # Si estaba eliminado, reactivar
+                if status_id == 7:
+                    cur.execute("""
+                        UPDATE hardware_specs
+                        SET status_id = 5
+                        WHERE id = %s
+                    """, (hardware_id,))
+                    conn.commit()
+
+                return {
+                    "hardware_id": hardware_id,
+                    "message": "Hardware ya existía, se reutiliza."
+                }
+
+            cur.execute("""
+                INSERT INTO hardware_specs
+                (tipo_equipo, marca, modelo, procesador,
+                 ram_gb, almacenamiento, sistema_operativo, status_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 5)
+                RETURNING id
+            """, (
+                data["tipo_equipo"],
+                data["marca"],
+                data["modelo"],
+                data["procesador"],
+                data["ram_gb"],
+                data["almacenamiento"],
+                data["sistema_operativo"]
+            ))
+
+            hardware_id = cur.fetchone()[0]
+            conn.commit()
+
+            return {
+                "hardware_id": hardware_id,
+                "message": "Hardware creado correctamente."
+            }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/computers")
 def create_computer(data: dict):
     try:
         with get_conn() as conn, conn.cursor() as cur:
+            # Validar hardware_spec_id
+            cur.execute("""
+                SELECT id, status_id
+                FROM hardware_specs
+                WHERE id = %s
+            """, (data["hardware_spec_id"],))
+            hw = cur.fetchone()
+
+            if not hw:
+                raise HTTPException(status_code=400, detail="El hardware_spec_id no existe.")
+
+            if hw[1] == 7:
+                raise HTTPException(status_code=400, detail="El hardware seleccionado está eliminado.")
+
+            # Buscar si ya existe computadora con esa serie
+            cur.execute("""
+                SELECT id, estado_id
+                FROM computers
+                WHERE numero_serie = %s
+                LIMIT 1
+            """, (data["numero_serie"],))
+            existing = cur.fetchone()
+
+            if existing:
+                computer_id, estado_id_actual = existing
+
+                if estado_id_actual == 7:
+                    cur.execute("""
+                        UPDATE computers
+                        SET hardware_spec_id = %s,
+                            tipo_propiedad = %s,
+                            estado_id = 2,
+                            tarifa_mensual = %s,
+                            fecha_recepcion_proveedor = %s,
+                            anio_fabricacion = %s,
+                            observaciones = %s
+                        WHERE id = %s
+                        RETURNING id
+                    """, (
+                        data["hardware_spec_id"],
+                        data["tipo_propiedad"],
+                        data["tarifa_mensual"],
+                        data["fecha_recepcion_proveedor"],
+                        data["anio_fabricacion"],
+                        data.get("observaciones"),
+                        computer_id
+                    ))
+                    reactivated_id = cur.fetchone()[0]
+                    conn.commit()
+
+                    return {
+                        "computer_id": reactivated_id,
+                        "message": "La computadora existía como eliminada y fue reactivada correctamente."
+                    }
+
+                raise HTTPException(status_code=400, detail="El número de serie ya está registrado.")
+
             cur.execute("""
                 INSERT INTO computers
-                (hardware_spec_id,numero_serie,tipo_propiedad,
-                 estado_id,tarifa_mensual,fecha_recepcion_proveedor,anio_fabricacion)
-                VALUES (%s,%s,%s,
-                    (SELECT id FROM statuses WHERE nombre='DISPONIBLE'),
-                    %s,%s,%s)
+                (hardware_spec_id, numero_serie, tipo_propiedad,
+                 estado_id, tarifa_mensual, fecha_recepcion_proveedor,
+                 observaciones, anio_fabricacion)
+                VALUES (%s, %s, %s, 2, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 data["hardware_spec_id"],
@@ -77,162 +209,365 @@ def create_computer(data: dict):
                 data["tipo_propiedad"],
                 data["tarifa_mensual"],
                 data["fecha_recepcion_proveedor"],
+                data.get("observaciones"),
                 data["anio_fabricacion"]
             ))
-            return {"computer_id": cur.fetchone()[0]}
-            
+
+            computer_id = cur.fetchone()[0]
+            conn.commit()
+
+            return {
+                "computer_id": computer_id,
+                "message": "Computadora creada correctamente."
+            }
+
+    except HTTPException:
+        raise
     except psycopg2.errors.UniqueViolation:
-        # Esto captura el error de duplicados específicamente
         raise HTTPException(status_code=400, detail="El número de serie ya está registrado.")
     except Exception as e:
-        # Esto captura cualquier otro error
-        raise HTTPException(status_code=500, detail=str(e))
- 
+        raise HTTPException(status_code=500, detail=f"Error al crear computadora: {str(e)}")
+
+
 @router.post("/accessory-types")
 def create_accessory_type(data: dict):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO accessory_types (nombre,status_id)
-            VALUES (%s,(SELECT id FROM statuses WHERE nombre='ACTIVO'))
-            RETURNING id
-        """, (data["nombre"],))
-        return {"accessory_type_id": cur.fetchone()[0]}
- 
+        try:
+            cur.execute("""
+                INSERT INTO accessory_types (nombre, status_id)
+                VALUES (%s, (SELECT id FROM statuses WHERE nombre = 'ACTIVO'))
+                RETURNING id
+            """, (data["nombre"],))
+            accessory_type_id = cur.fetchone()[0]
+            conn.commit()
+            return {"accessory_type_id": accessory_type_id}
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al crear tipo de accesorio: {str(e)}")
+
+
 @router.post("/accessories")
-
 def create_accessory(data: dict):
-
     with get_conn() as conn, conn.cursor() as cur:
+        try:
+            # Validar serial existente
+            cur.execute("""
+                SELECT id, estado_id
+                FROM accessories
+                WHERE numero_serie = %s
+                LIMIT 1
+            """, (data["numero_serie"],))
+            existing = cur.fetchone()
 
-        cur.execute("""
+            if existing:
+                accessory_id, estado_id_actual = existing
 
-            INSERT INTO accessories
+                # Si estaba eliminado, reactivar
+                if estado_id_actual == 7:
+                    cur.execute("""
+                        UPDATE accessories
+                        SET accessory_type_id = %s,
+                            marca = %s,
+                            modelo = %s,
+                            estado_id = (SELECT id FROM statuses WHERE nombre = 'DISPONIBLE'),
+                            tipo_propiedad = %s
+                        WHERE id = %s
+                        RETURNING id
+                    """, (
+                        data["accessory_type_id"],
+                        data["marca"],
+                        data["modelo"],
+                        data["tipo_propiedad"],
+                        accessory_id
+                    ))
+                    accessory_id = cur.fetchone()[0]
+                    conn.commit()
 
-            (accessory_type_id, marca, modelo, numero_serie, estado_id, tipo_propiedad)
+                    return {
+                        "accessory_id": accessory_id,
+                        "message": "El accesorio existía como eliminado y fue reactivado correctamente."
+                    }
 
-            VALUES (%s, %s, %s, %s,
+                raise HTTPException(
+                    status_code=400,
+                    detail="El número de serie del accesorio ya está registrado."
+                )
 
-                (SELECT id FROM statuses WHERE nombre = 'DISPONIBLE'),
+            cur.execute("""
+                INSERT INTO accessories
+                (accessory_type_id, marca, modelo, numero_serie, estado_id, tipo_propiedad)
+                VALUES (
+                    %s, %s, %s, %s,
+                    (SELECT id FROM statuses WHERE nombre = 'DISPONIBLE'),
+                    %s
+                )
+                RETURNING id
+            """, (
+                data["accessory_type_id"],
+                data["marca"],
+                data["modelo"],
+                data["numero_serie"],
+                data["tipo_propiedad"]
+            ))
 
-                %s
+            accessory_id = cur.fetchone()[0]
+            conn.commit()
 
-            )
+            return {"accessory_id": accessory_id}
 
-            RETURNING id
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al crear accesorio: {str(e)}")
 
-        """, (
 
-            data["accessory_type_id"],
-
-            data["marca"],
-
-            data["modelo"],
-
-            data["numero_serie"],
-
-            data["tipo_propiedad"]   # 👈 nuevo campo
-
-        ))
-
-        return {"accessory_id": cur.fetchone()[0]}
-
- 
- 
 # =========================
 # ASIGNACIONES
 # =========================
 @router.post("/assign/computer")
 def assign_computer(data: dict):
     with get_conn() as conn, conn.cursor() as cur:
-        # 1. VALIDACIÓN CORREGIDA: Ahora aceptamos DISPONIBLE o NUEVO
-        cur.execute("""
-    SELECT 1 FROM computers c
-    JOIN statuses s ON c.estado_id = s.id
-    -- AQUÍ ESTÁ EL TRUCO: ACEPTAR 'NUEVO'
-    WHERE c.id=%s AND s.nombre IN ('DISPONIBLE', 'NUEVO') 
-""", (data["computer_id"],))
-        
-        if not cur.fetchone():
-            raise HTTPException(400, "Computadora no disponible (Debe estar DISPONIBLE o NUEVO)")
+        try:
+            # Bloquear la computadora para evitar doble asignación concurrente
+            cur.execute("""
+                SELECT c.id
+                FROM computers c
+                JOIN statuses s ON c.estado_id = s.id
+                WHERE c.id = %s
+                  AND s.nombre IN ('DISPONIBLE', 'NUEVO')
+                FOR UPDATE
+            """, (data["computer_id"],))
+            computer = cur.fetchone()
 
-        # 2. CREAR ASIGNACIÓN
-        cur.execute("""
-            INSERT INTO computer_assignments
-            (computer_id, person_id, fecha_asignacion)
-            VALUES (%s, %s, %s)
-        """, (data["computer_id"], data["person_id"], date.today()))
+            if not computer:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Computadora no disponible (Debe estar DISPONIBLE o NUEVO)"
+                )
 
-        # 3. ACTUALIZAR ESTADO A 'ASIGNADO'
-        cur.execute("""
-            UPDATE computers
-            SET estado_id=(SELECT id FROM statuses WHERE nombre='ASIGNADO')
-            WHERE id=%s
-        """, (data["computer_id"],))
+            # Validar si ya existe una asignación activa para esa computadora
+            cur.execute("""
+                SELECT id
+                FROM computer_assignments
+                WHERE computer_id = %s
+                  AND activo = TRUE
+                LIMIT 1
+            """, (data["computer_id"],))
+            existing_assignment = cur.fetchone()
 
-        return {"message": "Computadora asignada exitosamente"}
-    
+            if existing_assignment:
+                raise HTTPException(
+                    status_code=400,
+                    detail="La computadora ya tiene una asignación activa"
+                )
+
+            # Validar si la persona ya tiene una computadora activa
+            cur.execute("""
+                SELECT id
+                FROM computer_assignments
+                WHERE person_id = %s
+                  AND activo = TRUE
+                LIMIT 1
+            """, (data["person_id"],))
+            person_assignment = cur.fetchone()
+
+            if person_assignment:
+                raise HTTPException(
+                    status_code=400,
+                    detail="La persona ya tiene una computadora asignada"
+                )
+
+            # Insertar asignación activa
+            cur.execute("""
+                INSERT INTO computer_assignments
+                (computer_id, person_id, fecha_asignacion, activo)
+                VALUES (%s, %s, %s, TRUE)
+                RETURNING id
+            """, (data["computer_id"], data["person_id"], date.today()))
+            assignment_id = cur.fetchone()[0]
+
+            # Actualizar estado del equipo
+            cur.execute("""
+                UPDATE computers
+                SET estado_id = (SELECT id FROM statuses WHERE nombre = 'ASIGNADO')
+                WHERE id = %s
+            """, (data["computer_id"],))
+
+            conn.commit()
+
+            return {
+                "message": "Computadora asignada exitosamente",
+                "assignment_id": assignment_id
+            }
+
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al asignar computadora: {str(e)}")
+
+
 @router.post("/assign/accessory")
 def assign_accessory(data: dict):
     with get_conn() as conn, conn.cursor() as cur:
-        # 1. VALIDAR: Aceptamos DISPONIBLE o NUEVO
-        cur.execute("""
-            SELECT 1 FROM accessories a
-            JOIN statuses s ON a.estado_id = s.id
-            WHERE a.id=%s AND s.nombre IN ('DISPONIBLE', 'NUEVO')
-        """, (data["accessory_id"],))
-        
-        if not cur.fetchone():
-            raise HTTPException(400, "Accesorio no disponible (Debe estar DISPONIBLE o NUEVO)")
+        try:
+            # Bloquear accesorio
+            cur.execute("""
+                SELECT a.id
+                FROM accessories a
+                JOIN statuses s ON a.estado_id = s.id
+                WHERE a.id = %s
+                  AND s.nombre IN ('DISPONIBLE', 'NUEVO')
+                FOR UPDATE
+            """, (data["accessory_id"],))
+            accessory = cur.fetchone()
 
-        # 2. INSERTAR RELACIÓN
-        cur.execute("""
-            INSERT INTO person_accessories
-            (person_id, accessory_id, fecha_asignacion)
-            VALUES (%s, %s, %s)
-        """, (data["person_id"], data["accessory_id"], date.today()))
+            if not accessory:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Accesorio no disponible (Debe estar DISPONIBLE o NUEVO)"
+                )
 
-        # 3. ACTUALIZAR ESTADO A 'ASIGNADO'
-        cur.execute("""
-            UPDATE accessories
-            SET estado_id=(SELECT id FROM statuses WHERE nombre='ASIGNADO')
-            WHERE id=%s
-        """, (data["accessory_id"],))
+            # Validar relación duplicada activa
+            cur.execute("""
+                SELECT id
+                FROM person_accessories
+                WHERE person_id = %s
+                  AND accessory_id = %s
+                  AND activo = TRUE
+                LIMIT 1
+            """, (data["person_id"], data["accessory_id"]))
+            existing_relation = cur.fetchone()
 
-        return {"message": "Accesorio asignado correctamente"}
- 
+            if existing_relation:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ese accesorio ya está asignado a esa persona"
+                )
+
+            # Validar que no esté asignado a otra persona
+            cur.execute("""
+                SELECT id
+                FROM person_accessories
+                WHERE accessory_id = %s
+                  AND activo = TRUE
+                LIMIT 1
+            """, (data["accessory_id"],))
+            existing_active_accessory = cur.fetchone()
+
+            if existing_active_accessory:
+                raise HTTPException(
+                    status_code=400,
+                    detail="El accesorio ya tiene una asignación activa"
+                )
+
+            # Insertar asignación
+            cur.execute("""
+                INSERT INTO person_accessories
+                (person_id, accessory_id, fecha_asignacion, activo)
+                VALUES (%s, %s, %s, TRUE)
+                RETURNING id
+            """, (data["person_id"], data["accessory_id"], date.today()))
+            relation_id = cur.fetchone()[0]
+
+            # Actualizar estado del accesorio
+            cur.execute("""
+                UPDATE accessories
+                SET estado_id = (SELECT id FROM statuses WHERE nombre = 'ASIGNADO')
+                WHERE id = %s
+            """, (data["accessory_id"],))
+
+            conn.commit()
+
+            return {
+                "message": "Accesorio asignado correctamente",
+                "relation_id": relation_id
+            }
+
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al asignar accesorio: {str(e)}")
+
+
 # =========================
 # DELETE = ELIMINADO
 # =========================
-# Busca esta parte en tu código y REEMPLÁZALA:
-# @router.delete("/computers/{id}") ...
-
 @router.delete("/computers/{serial}")
 def delete_computer(serial: str):
     with get_conn() as conn, conn.cursor() as cur:
-        # 1. Verificamos que el equipo exista antes de borrarlo
-        cur.execute("SELECT id FROM computers WHERE numero_serie = %s", (serial,))
-        if not cur.fetchone():
-            raise HTTPException(status_code=404, detail="Equipo no encontrado")
+        try:
+            cur.execute("""
+                SELECT id
+                FROM computers
+                WHERE numero_serie = %s
+            """, (serial,))
+            row = cur.fetchone()
 
-        # 2. Marcamos como ELIMINADO usando el número de serie
-        cur.execute("""
-            UPDATE computers
-            SET estado_id=(SELECT id FROM statuses WHERE nombre='ELIMINADO')
-            WHERE numero_serie=%s
-        """, (serial,))
-        
-        return {"message": f"Computadora {serial} eliminada"}
- 
+            if not row:
+                raise HTTPException(status_code=404, detail="Equipo no encontrado")
+
+            computer_id = row[0]
+
+            # Cerrar asignaciones activas
+            cur.execute("""
+                UPDATE computer_assignments
+                SET activo = FALSE,
+                    fecha_desasignacion = CURRENT_DATE
+                WHERE computer_id = %s
+                  AND activo = TRUE
+            """, (computer_id,))
+
+            # Eliminar lógicamente
+            cur.execute("""
+                UPDATE computers
+                SET estado_id = 7
+                WHERE id = %s
+            """, (computer_id,))
+
+            conn.commit()
+            return {"message": f"Computadora {serial} eliminada correctamente"}
+
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al eliminar computadora: {str(e)}")
+
+
 @router.delete("/accessories/{id}")
 def delete_accessory(id: int):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            UPDATE accessories
-            SET estado_id=(SELECT id FROM statuses WHERE nombre='ELIMINADO')
-            WHERE id=%s
-        """, (id,))
-        return {"message": "Accesorio eliminado"}
- 
+        try:
+            # Cerrar asignación activa si existe
+            cur.execute("""
+                UPDATE person_accessories
+                SET activo = FALSE,
+                    fecha_desasignacion = CURRENT_DATE
+                WHERE accessory_id = %s
+                  AND activo = TRUE
+            """, (id,))
+
+            cur.execute("""
+                UPDATE accessories
+                SET estado_id = (SELECT id FROM statuses WHERE nombre = 'ELIMINADO')
+                WHERE id = %s
+            """, (id,))
+
+            conn.commit()
+            return {"message": "Accesorio eliminado"}
+
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al eliminar accesorio: {str(e)}")
+
+
 # =========================
 # VISTAS
 # =========================
@@ -241,24 +576,95 @@ def vista_equipo_completo():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT * FROM vw_equipo_completo ORDER BY empleado")
         return cur.fetchall()
- 
+
+
 @router.get("/vista/equipo-completo/{cedula}")
 def vista_equipo_por_cedula(cedula: str):
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM vw_equipo_completo WHERE cedula=%s", (cedula,))
+        cur.execute("SELECT * FROM vw_equipo_completo WHERE cedula = %s", (cedula,))
         return cur.fetchall()
- 
+
 @router.get("/vista/inventario-general")
 def vista_inventario_general():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM vw_inventario_general")
+        cur.execute("""
+            WITH ultima_asignacion AS (
+                SELECT DISTINCT ON (ca.computer_id)
+                    ca.computer_id,
+                    ca.person_id,
+                    ca.fecha_asignacion,
+                    ca.id
+                FROM computer_assignments ca
+                WHERE ca.activo = TRUE
+                ORDER BY ca.computer_id, ca.fecha_asignacion DESC, ca.id DESC
+            )
+            SELECT
+                c.id,
+                c.hardware_spec_id,
+
+                c.numero_serie,
+
+                hs.tipo_equipo,
+                hs.tipo_equipo AS equipo,
+
+                hs.marca,
+                hs.modelo,
+                hs.procesador,
+                hs.ram_gb,
+                hs.almacenamiento,
+                hs.sistema_operativo,
+                hs.pantalla,
+                hs.otros,
+                hs.status_id,
+
+                c.tipo_propiedad,
+                c.tipo_propiedad AS propiedad,
+
+                c.tarifa_mensual,
+                c.fecha_recepcion_proveedor,
+                c.observaciones,
+                c.anio_fabricacion,
+
+                s.id AS estado_id,
+                s.nombre AS estado,
+                s.nombre AS estado_computadora,
+                s.nombre AS status_nombre,
+
+                p.id AS person_id,
+                p.id AS id_persona,
+                p.nombre AS usuario_actual,
+                p.cedula,
+                p.cargo,
+                p.area,
+                p.email,
+                p.company_id,
+
+                comp.nombre AS company_nombre
+
+            FROM computers c
+            JOIN hardware_specs hs
+                ON c.hardware_spec_id = hs.id
+            JOIN statuses s
+                ON c.estado_id = s.id
+            LEFT JOIN ultima_asignacion ua
+                ON ua.computer_id = c.id
+            LEFT JOIN people p
+                ON p.id = ua.person_id
+            LEFT JOIN companies comp
+                ON comp.id = p.company_id
+            WHERE s.nombre <> 'ELIMINADO'
+            ORDER BY c.numero_serie;
+        """)
         return cur.fetchall()
+
+
 @router.get("/vista/computadora-asignada")
 def computadoras_asignadas():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT * FROM vw_computadora_asignada")
         return cur.fetchall()
- 
+
+
 @router.get("/vista/accesorios-por-persona/{cedula}")
 def accesorios_por_persona(cedula: str):
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -268,9 +674,11 @@ def accesorios_por_persona(cedula: str):
             WHERE cedula = %s
         """, (cedula,))
         return cur.fetchall()
- 
-#GET CONSULTAS API
- 
+
+
+# =========================
+# GET CONSULTAS API
+# =========================
 @router.get("/catalogos/statuses")
 def get_statuses():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -281,7 +689,8 @@ def get_statuses():
             ORDER BY nombre
         """)
         return cur.fetchall()
- 
+
+
 @router.get("/companies")
 def get_companies():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -293,12 +702,13 @@ def get_companies():
             ORDER BY c.nombre
         """)
         return cur.fetchall()
- 
+
+
 @router.get("/people")
 def get_people():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
-            SELECT 
+            SELECT
                 p.id,
                 p.cedula,
                 p.nombre,
@@ -316,18 +726,20 @@ def get_people():
             ORDER BY p.nombre
         """)
         return cur.fetchall()
- 
+
+
 @router.get("/hardware")
 def get_hardware():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""
             SELECT id, tipo_equipo, marca, modelo
             FROM hardware_specs
-            WHERE status_id <> (SELECT id FROM statuses WHERE nombre='ELIMINADO')
+            WHERE status_id <> (SELECT id FROM statuses WHERE nombre = 'ELIMINADO')
             ORDER BY marca, modelo
         """)
         return cur.fetchall()
- 
+
+
 @router.get("/accessory-types")
 def get_accessory_types():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -339,7 +751,8 @@ def get_accessory_types():
             ORDER BY at.nombre
         """)
         return cur.fetchall()
- 
+
+
 @router.get("/accessories/disponibles")
 def get_accessories_disponibles():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -350,16 +763,16 @@ def get_accessories_disponibles():
                 a.marca,
                 a.modelo,
                 a.numero_serie,
-                a.tipo_propiedad    
+                a.tipo_propiedad
             FROM accessories a
             JOIN statuses s ON a.estado_id = s.id
             JOIN accessory_types at ON a.accessory_type_id = at.id
-            -- CAMBIO: Aceptamos DISPONIBLE y NUEVO
             WHERE s.nombre IN ('DISPONIBLE', 'NUEVO')
             ORDER BY at.nombre
         """)
         return cur.fetchall()
-    
+
+
 @router.get("/computers/disponibles")
 def get_computers_disponibles():
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -373,37 +786,53 @@ def get_computers_disponibles():
             FROM computers c
             JOIN statuses s ON c.estado_id = s.id
             JOIN hardware_specs hs ON c.hardware_spec_id = hs.id
-            -- CAMBIO: Ahora traemos DISPONIBLE y NUEVO
             WHERE s.nombre IN ('DISPONIBLE', 'NUEVO')
             ORDER BY c.numero_serie
         """)
         return cur.fetchall()
-    
-# Agrega esto debajo de tus otros endpoints, antes de los GET
+
 
 @router.put("/computers/{serial}/status")
 def change_computer_status(serial: str, data: dict):
-    # data espera recibir: {"nuevo_estado": "DISPONIBLE"} o "BAJA"
     nuevo_estado = data.get("nuevo_estado")
-    
-    with get_conn() as conn, conn.cursor() as cur:
-        # 1. Validar que el equipo exista
-        cur.execute("SELECT id FROM computers WHERE numero_serie = %s", (serial,))
-        if not cur.fetchone():
-            raise HTTPException(status_code=404, detail="Equipo no encontrado")
 
-        # 2. Actualizar al estado deseado
-        cur.execute("""
-            UPDATE computers
-            SET estado_id = (SELECT id FROM statuses WHERE nombre = %s)
-            WHERE numero_serie = %s
-        """, (nuevo_estado, serial))
-        
-        # 3. Si se está "LIBERANDO" (poniendo en DISPONIBLE), opcionalmente podrías querer 
-        # registrar fecha de devolución en asignaciones, pero por ahora solo liberamos el activo.
-        
-        return {"message": f"Equipo {serial} actualizado a {nuevo_estado}"}
-        
+    with get_conn() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("SELECT id FROM computers WHERE numero_serie = %s", (serial,))
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(status_code=404, detail="Equipo no encontrado")
+
+            computer_id = row[0]
+
+            # Si se libera, cerrar asignación activa
+            if nuevo_estado == "DISPONIBLE":
+                cur.execute("""
+                    UPDATE computer_assignments
+                    SET activo = FALSE,
+                        fecha_desasignacion = CURRENT_DATE
+                    WHERE computer_id = %s
+                      AND activo = TRUE
+                """, (computer_id,))
+
+            cur.execute("""
+                UPDATE computers
+                SET estado_id = (SELECT id FROM statuses WHERE nombre = %s)
+                WHERE numero_serie = %s
+            """, (nuevo_estado, serial))
+
+            conn.commit()
+            return {"message": f"Equipo {serial} actualizado a {nuevo_estado}"}
+
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al cambiar estado: {str(e)}")
+
+
 @router.get("/accesorios/persona/{cedula}")
 def get_accesorios_persona(cedula: str):
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -413,158 +842,207 @@ def get_accesorios_persona(cedula: str):
             WHERE cedula = %s
         """, (cedula,))
         return cur.fetchall()
-    
+
 
 @router.post("/unassign/full/{person_id}")
 def unassign_full(person_id: int):
- 
     with get_conn() as conn, conn.cursor() as cur:
- 
-        # ======================
-        # 1️⃣ Buscar computadora
-        # ======================
-        cur.execute("""
-            SELECT computer_id
-            FROM computer_assignments
-            WHERE person_id = %s
-            AND activo = TRUE
-        """, (person_id,))
-        comp = cur.fetchone()
- 
-        if comp:
-            computer_id = comp[0]
- 
-            # Registrar historial DEVOLUCION COMPUTADORA
+        try:
+            # ======================
+            # 1. Buscar computadora activa
+            # ======================
             cur.execute("""
-                INSERT INTO delivery_history
-                (computer_id, person_id, tipo_movimiento, fecha_movimiento, usuario_registro)
-                VALUES (%s,%s,'DEVOLUCION',CURRENT_DATE,'sistema')
-            """, (computer_id, person_id))
- 
-            # Desasignar computadora
+                SELECT computer_id
+                FROM computer_assignments
+                WHERE person_id = %s
+                  AND activo = TRUE
+            """, (person_id,))
+            comp = cur.fetchone()
+
+            if comp:
+                computer_id = comp[0]
+
+                # Historial devolución computadora
+                cur.execute("""
+                    INSERT INTO delivery_history
+                    (computer_id, person_id, tipo_movimiento, fecha_movimiento, usuario_registro)
+                    VALUES (%s, %s, 'DEVOLUCION', CURRENT_DATE, 'sistema')
+                """, (computer_id, person_id))
+
+                # Desasignar computadora
+                cur.execute("""
+                    UPDATE computer_assignments
+                    SET activo = FALSE,
+                        fecha_desasignacion = CURRENT_DATE
+                    WHERE computer_id = %s
+                      AND activo = TRUE
+                """, (computer_id,))
+
+                # Liberar computadora
+                cur.execute("""
+                    UPDATE computers
+                    SET estado_id = (
+                        SELECT id FROM statuses WHERE nombre = 'DISPONIBLE'
+                    )
+                    WHERE id = %s
+                """, (computer_id,))
+
+            # ======================
+            # 2. Accesorios activos
+            # ======================
+            cur.execute("""
+                SELECT accessory_id
+                FROM person_accessories
+                WHERE person_id = %s
+                  AND activo = TRUE
+            """, (person_id,))
+            accesorios = [a[0] for a in cur.fetchall()]
+
+            for acc in accesorios:
+                cur.execute("""
+                    INSERT INTO accessory_history
+                    (accessory_id, person_id, tipo_movimiento, fecha_movimiento, usuario_registro)
+                    VALUES (%s, %s, 'DEVOLUCION', CURRENT_DATE, 'sistema')
+                """, (acc, person_id))
+
+            # Cerrar relaciones activas, no borrar histórico a lo bruto
+            cur.execute("""
+                UPDATE person_accessories
+                SET activo = FALSE,
+                    fecha_desasignacion = CURRENT_DATE
+                WHERE person_id = %s
+                  AND activo = TRUE
+            """, (person_id,))
+
+            if accesorios:
+                cur.execute("""
+                    UPDATE accessories
+                    SET estado_id = (
+                        SELECT id FROM statuses WHERE nombre = 'DISPONIBLE'
+                    )
+                    WHERE id = ANY(%s)
+                """, (accesorios,))
+
+            conn.commit()
+            return {"mensaje": "Equipo completo desasignado"}
+
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error en desasignación completa: {str(e)}")
+
+
+@router.put("/unassign/computer/{computer_id}")
+def unassign_computer(computer_id: int):
+    with get_conn() as conn, conn.cursor() as cur:
+        try:
+            # Cerrar asignación activa
             cur.execute("""
                 UPDATE computer_assignments
                 SET activo = FALSE,
-                    fecha_desasignacion = CURRENT_DATE
+                    fecha_desasignacion = %s
                 WHERE computer_id = %s
-                AND activo = TRUE
-            """, (computer_id,))
- 
-            # Liberar computadora
+                  AND activo = TRUE
+            """, (date.today(), computer_id))
+
+            # Poner equipo disponible
             cur.execute("""
                 UPDATE computers
-                SET estado_id = (
-                    SELECT id FROM statuses WHERE nombre='DISPONIBLE'
-                )
+                SET estado_id = (SELECT id FROM statuses WHERE nombre = 'DISPONIBLE')
                 WHERE id = %s
             """, (computer_id,))
- 
-        # ======================
-        # 2️⃣ Accesorios
-        # ======================
-        cur.execute("""
-            SELECT accessory_id
-            FROM person_accessories
-            WHERE person_id = %s
-        """, (person_id,))
-        accesorios = [a[0] for a in cur.fetchall()]
- 
-        for acc in accesorios:
- 
-            # Historial accesorio
-            cur.execute("""
-                INSERT INTO accessory_history
-                (accessory_id, person_id, tipo_movimiento, fecha_movimiento, usuario_registro)
-                VALUES (%s,%s,'DEVOLUCION',CURRENT_DATE,'sistema')
-            """, (acc, person_id))
- 
-        # Eliminar relación
-        cur.execute("""
-            DELETE FROM person_accessories
-            WHERE person_id = %s
-        """, (person_id,))
- 
-        # Liberar accesorios
-        if accesorios:
-            cur.execute("""
-                UPDATE accessories
-                SET estado_id = (
-                    SELECT id FROM statuses WHERE nombre='DISPONIBLE'
-                )
-                WHERE id = ANY(%s)
-            """, (accesorios,))
- 
-        return {"mensaje": "Equipo completo desasignado"}
-    
+
+            conn.commit()
+            return {"message": "Computadora liberada correctamente"}
+
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al liberar computadora: {str(e)}")
+
+
+# =========================
+# UPDATES
 # =========================
 @router.put("/people/{id}")
 def update_person(id: int, data: dict):
     with get_conn() as conn, conn.cursor() as cur:
-        # Validar existencia
-        cur.execute("SELECT id FROM people WHERE id = %s", (id,))
-        if not cur.fetchone():
-            raise HTTPException(status_code=404, detail="Persona no encontrada")
+        try:
+            cur.execute("SELECT id FROM people WHERE id = %s", (id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Persona no encontrada")
 
-        # Update
-        cur.execute("""
-            UPDATE people
-            SET cedula = %s,
-                nombre = %s,
-                cargo = %s,
-                area = %s,
-                email = %s,
-                company_id = %s,
-                status_id = %s
-            WHERE id = %s
-        """, (
-            data["cedula"],
-            data["nombre"],
-            data["cargo"],
-            data["area"],
-            data["email"],
-            data["company_id"],
-            data["status_id"],
-            id
-        ))
+            cur.execute("""
+                UPDATE people
+                SET cedula = %s,
+                    nombre = %s,
+                    cargo = %s,
+                    area = %s,
+                    email = %s,
+                    company_id = %s,
+                    status_id = %s
+                WHERE id = %s
+            """, (
+                data["cedula"],
+                data["nombre"],
+                data["cargo"],
+                data["area"],
+                data["email"],
+                data["company_id"],
+                data["status_id"],
+                id
+            ))
 
-        return {"message": f"Persona {id} actualizada correctamente"}
-    
+            conn.commit()
+            return {"message": f"Persona {id} actualizada correctamente"}
 
-# =========================
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al actualizar persona: {str(e)}")
+
+
 @router.put("/hardware/{id}")
 def update_hardware(id: int, data: dict):
     with get_conn() as conn, conn.cursor() as cur:
-        # Validar existencia
-        cur.execute("SELECT id FROM hardware_specs WHERE id = %s", (id,))
-        if not cur.fetchone():
-            raise HTTPException(status_code=404, detail="Hardware no encontrado")
+        try:
+            cur.execute("SELECT id FROM hardware_specs WHERE id = %s", (id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Hardware no encontrado")
 
-        # Update
-        cur.execute("""
-            UPDATE hardware_specs
-            SET tipo_equipo = %s,
-                marca = %s,
-                modelo = %s,
-                procesador = %s,
-                ram_gb = %s,
-                almacenamiento = %s,
-                sistema_operativo = %s,
-                pantalla = %s,
-                otros = %s,
-                status_id = %s
-            WHERE id = %s
-        """, (
-            data["tipo_equipo"],
-            data["marca"],
-            data["modelo"],
-            data["procesador"],
-            data["ram_gb"],
-            data["almacenamiento"],
-            data["sistema_operativo"],
-            data.get("pantalla"),
-            data.get("otros"),
-            data["status_id"],
-            id
-        ))
+            cur.execute("""
+                UPDATE hardware_specs
+                SET tipo_equipo = %s,
+                    marca = %s,
+                    modelo = %s,
+                    procesador = %s,
+                    ram_gb = %s,
+                    almacenamiento = %s,
+                    sistema_operativo = %s,
+                    pantalla = %s,
+                    otros = %s,
+                    status_id = %s
+                WHERE id = %s
+            """, (
+                data["tipo_equipo"],
+                data["marca"],
+                data["modelo"],
+                data["procesador"],
+                data["ram_gb"],
+                data["almacenamiento"],
+                data["sistema_operativo"],
+                data.get("pantalla"),
+                data.get("otros"),
+                data["status_id"],
+                id
+            ))
 
-        return {"message": f"Hardware {id} actualizado correctamente"}
+            conn.commit()
+            return {"message": f"Hardware {id} actualizado correctamente"}
+
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error al actualizar hardware: {str(e)}")
