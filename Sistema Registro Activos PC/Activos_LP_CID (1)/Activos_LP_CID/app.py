@@ -1,7 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware # <--- 1. Importar el middleware
+from dotenv import load_dotenv
+from pathlib import Path
 from activos_equipos import router as activos_equipos_router
 from login import router as login_router
+
+load_dotenv(Path(__file__).with_name(".env"))
 
 app = FastAPI(title="Sistema de Activos")
 
@@ -10,6 +14,7 @@ app = FastAPI(title="Sistema de Activos")
 # ==========================================
 origins = [
     "http://localhost:3000", # La dirección de tu proyecto React
+    "http://192.168.20.4:4001"
 ]
 
 app.add_middleware(

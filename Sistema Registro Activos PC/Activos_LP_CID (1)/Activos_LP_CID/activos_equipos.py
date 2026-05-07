@@ -3,8 +3,24 @@ from psycopg2.extras import RealDictCursor
 from datetime import date
 import psycopg2
 import os
+import traceback
+
 
 router = APIRouter(prefix="/equipos", tags=["Equipos"])
+
+
+def _texto_requerido(data: dict, campo: str) -> str:
+    valor = str(data.get(campo, "")).strip()
+    if not valor:
+        raise HTTPException(status_code=400, detail=f"El campo {campo} es obligatorio.")
+    return valor
+
+
+def _entero_requerido(data: dict, campo: str) -> int:
+    try:
+        return int(data.get(campo))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"El campo {campo} debe ser un numero valido.")
 
 
 def get_conn():
@@ -22,6 +38,7 @@ def get_conn():
 # =========================
 @router.post("/companies")
 def create_company(data: dict):
+    print("POST /equipos/companies payload:", data)
     with get_conn() as conn, conn.cursor() as cur:
         try:
             cur.execute("""
@@ -34,11 +51,17 @@ def create_company(data: dict):
             return {"company_id": company_id}
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN /equipos/companies ===")
+            print("Payload recibido:", data)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al crear compañía: {str(e)}")
 
 
 @router.post("/people")
 def create_person(data: dict):
+    print("POST /equipos/people payload:", data)
     with get_conn() as conn, conn.cursor() as cur:
         try:
             cur.execute("""
@@ -60,11 +83,17 @@ def create_person(data: dict):
             return {"person_id": person_id}
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN /equipos/people ===")
+            print("Payload recibido:", data)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al crear persona: {str(e)}")
 
 
 @router.post("/hardware")
 def create_hardware(data: dict):
+    print("POST /equipos/hardware payload:", data)
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""
@@ -132,11 +161,17 @@ def create_hardware(data: dict):
             }
 
     except Exception as e:
+        print("=== ERROR EN /equipos/hardware ===")
+        print("Payload recibido:", data)
+        print("Tipo de error:", type(e).__name__)
+        print("Mensaje:", str(e))
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/computers")
 def create_computer(data: dict):
+    print("POST /equipos/computers payload:", data)
     try:
         with get_conn() as conn, conn.cursor() as cur:
             # Validar hardware_spec_id
@@ -223,40 +258,83 @@ def create_computer(data: dict):
 
     except HTTPException:
         raise
-    except psycopg2.errors.UniqueViolation:
+    except psycopg2.errors.UniqueViolation as e:
+        print("=== ERROR UNIQUE VIOLATION EN /equipos/computers ===")
+        print("Payload recibido:", data)
+        print("Tipo de error:", type(e).__name__)
+        print("Mensaje:", str(e))
+        traceback.print_exc()
         raise HTTPException(status_code=400, detail="El número de serie ya está registrado.")
     except Exception as e:
+        print("=== ERROR EN /equipos/computers ===")
+        print("Payload recibido:", data)
+        print("Tipo de error:", type(e).__name__)
+        print("Mensaje:", str(e))
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error al crear computadora: {str(e)}")
 
 
 @router.post("/accessory-types")
 def create_accessory_type(data: dict):
+    print("POST /equipos/accessory-types payload:", data)
+    nombre = _texto_requerido(data, "nombre").upper()
+
     with get_conn() as conn, conn.cursor() as cur:
         try:
             cur.execute("""
                 INSERT INTO accessory_types (nombre, status_id)
                 VALUES (%s, (SELECT id FROM statuses WHERE nombre = 'ACTIVO'))
                 RETURNING id
-            """, (data["nombre"],))
+            """, (nombre,))
             accessory_type_id = cur.fetchone()[0]
             conn.commit()
             return {"accessory_type_id": accessory_type_id}
+        except HTTPException:
+            conn.rollback()
+            raise
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail="Ese tipo de accesorio ya esta registrado.")
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN /equipos/accessory-types ===")
+            print("Payload recibido:", data)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al crear tipo de accesorio: {str(e)}")
 
 
 @router.post("/accessories")
 def create_accessory(data: dict):
+    print("POST /equipos/accessories payload:", data)
+    accessory_type_id = _entero_requerido(data, "accessory_type_id")
+    marca = _texto_requerido(data, "marca").upper()
+    modelo = _texto_requerido(data, "modelo").upper()
+    numero_serie = _texto_requerido(data, "numero_serie").upper()
+    tipo_propiedad = _texto_requerido(data, "tipo_propiedad").upper()
+
+    if tipo_propiedad not in {"PROPIO", "ARRIENDO"}:
+        raise HTTPException(status_code=400, detail="El tipo de propiedad debe ser PROPIO o ARRIENDO.")
+
     with get_conn() as conn, conn.cursor() as cur:
         try:
+            cur.execute("""
+                SELECT id
+                FROM accessory_types
+                WHERE id = %s
+                  AND status_id <> (SELECT id FROM statuses WHERE nombre = 'ELIMINADO')
+            """, (accessory_type_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=400, detail="El tipo de accesorio seleccionado no existe o esta eliminado.")
+
             # Validar serial existente
             cur.execute("""
                 SELECT id, estado_id
                 FROM accessories
                 WHERE numero_serie = %s
                 LIMIT 1
-            """, (data["numero_serie"],))
+            """, (numero_serie,))
             existing = cur.fetchone()
 
             if existing:
@@ -274,10 +352,10 @@ def create_accessory(data: dict):
                         WHERE id = %s
                         RETURNING id
                     """, (
-                        data["accessory_type_id"],
-                        data["marca"],
-                        data["modelo"],
-                        data["tipo_propiedad"],
+                        accessory_type_id,
+                        marca,
+                        modelo,
+                        tipo_propiedad,
                         accessory_id
                     ))
                     accessory_id = cur.fetchone()[0]
@@ -303,11 +381,11 @@ def create_accessory(data: dict):
                 )
                 RETURNING id
             """, (
-                data["accessory_type_id"],
-                data["marca"],
-                data["modelo"],
-                data["numero_serie"],
-                data["tipo_propiedad"]
+                accessory_type_id,
+                marca,
+                modelo,
+                numero_serie,
+                tipo_propiedad
             ))
 
             accessory_id = cur.fetchone()[0]
@@ -320,6 +398,11 @@ def create_accessory(data: dict):
             raise
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN /equipos/accessories ===")
+            print("Payload recibido:", data)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al crear accesorio: {str(e)}")
 
 
@@ -328,6 +411,7 @@ def create_accessory(data: dict):
 # =========================
 @router.post("/assign/computer")
 def assign_computer(data: dict):
+    print("POST /equipos/assign/computer payload:", data)
     with get_conn() as conn, conn.cursor() as cur:
         try:
             # Bloquear la computadora para evitar doble asignación concurrente
@@ -407,11 +491,17 @@ def assign_computer(data: dict):
             raise
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN /equipos/assign/computer ===")
+            print("Payload recibido:", data)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al asignar computadora: {str(e)}")
 
 
 @router.post("/assign/accessory")
 def assign_accessory(data: dict):
+    print("POST /equipos/assign/accessory payload:", data)
     with get_conn() as conn, conn.cursor() as cur:
         try:
             # Bloquear accesorio
@@ -492,6 +582,11 @@ def assign_accessory(data: dict):
             raise
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN /equipos/assign/accessory ===")
+            print("Payload recibido:", data)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al asignar accesorio: {str(e)}")
 
 
@@ -500,6 +595,7 @@ def assign_accessory(data: dict):
 # =========================
 @router.delete("/computers/{serial}")
 def delete_computer(serial: str):
+    print(f"DELETE /equipos/computers/{serial}")
     with get_conn() as conn, conn.cursor() as cur:
         try:
             cur.execute("""
@@ -538,11 +634,17 @@ def delete_computer(serial: str):
             raise
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN DELETE /equipos/computers/{serial} ===")
+            print("Serial recibido:", serial)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al eliminar computadora: {str(e)}")
 
 
 @router.delete("/accessories/{id}")
 def delete_accessory(id: int):
+    print(f"DELETE /equipos/accessories/{id}")
     with get_conn() as conn, conn.cursor() as cur:
         try:
             # Cerrar asignación activa si existe
@@ -565,6 +667,11 @@ def delete_accessory(id: int):
 
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN DELETE /equipos/accessories/{id} ===")
+            print("ID recibido:", id)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al eliminar accesorio: {str(e)}")
 
 
@@ -573,107 +680,168 @@ def delete_accessory(id: int):
 # =========================
 @router.get("/vista/equipo-completo")
 def vista_equipo_completo():
+    print("GET /equipos/vista/equipo-completo")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM vw_equipo_completo ORDER BY empleado")
-        return cur.fetchall()
+        try:
+            cur.execute("SELECT * FROM vw_equipo_completo ORDER BY empleado")
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/vista/equipo-completo ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al consultar vista equipo completo: {str(e)}")
 
 
 @router.get("/vista/equipo-completo/{cedula}")
 def vista_equipo_por_cedula(cedula: str):
+    print(f"GET /equipos/vista/equipo-completo/{cedula}")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM vw_equipo_completo WHERE cedula = %s", (cedula,))
-        return cur.fetchall()
+        try:
+            cur.execute("SELECT * FROM vw_equipo_completo WHERE cedula = %s", (cedula,))
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/vista/equipo-completo/{cedula} ===")
+            print("Cédula recibida:", cedula)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al consultar equipo por cédula: {str(e)}")
 
 @router.get("/vista/inventario-general")
 def vista_inventario_general():
+    print("GET /equipos/vista/inventario-general")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            WITH ultima_asignacion AS (
-                SELECT DISTINCT ON (ca.computer_id)
-                    ca.computer_id,
-                    ca.person_id,
-                    ca.fecha_asignacion,
-                    ca.id
-                FROM computer_assignments ca
-                WHERE ca.activo = TRUE
-                ORDER BY ca.computer_id, ca.fecha_asignacion DESC, ca.id DESC
-            )
-            SELECT
-                c.id,
-                c.hardware_spec_id,
+        try:
+            cur.execute("""
+                WITH ultima_asignacion AS (
+                    SELECT DISTINCT ON (ca.computer_id)
+                        ca.computer_id,
+                        ca.person_id,
+                        ca.fecha_asignacion,
+                        ca.id
+                    FROM computer_assignments ca
+                    WHERE ca.activo = TRUE
+                    ORDER BY ca.computer_id, ca.fecha_asignacion DESC, ca.id DESC
+                )
+                SELECT
+                    c.id,
+                    c.hardware_spec_id,
 
-                c.numero_serie,
+                    c.numero_serie,
 
-                hs.tipo_equipo,
-                hs.tipo_equipo AS equipo,
+                    hs.tipo_equipo,
+                    hs.tipo_equipo AS equipo,
 
-                hs.marca,
-                hs.modelo,
-                hs.procesador,
-                hs.ram_gb,
-                hs.almacenamiento,
-                hs.sistema_operativo,
-                hs.pantalla,
-                hs.otros,
-                hs.status_id,
+                    hs.marca,
+                    hs.modelo,
+                    hs.procesador,
+                    hs.ram_gb,
+                    hs.almacenamiento,
+                    hs.sistema_operativo,
+                    hs.pantalla,
+                    hs.otros,
+                    hs.status_id,
 
-                c.tipo_propiedad,
-                c.tipo_propiedad AS propiedad,
+                    c.tipo_propiedad,
+                    c.tipo_propiedad AS propiedad,
 
-                c.tarifa_mensual,
-                c.fecha_recepcion_proveedor,
-                c.observaciones,
-                c.anio_fabricacion,
+                    c.tarifa_mensual,
+                    c.fecha_recepcion_proveedor,
+                    c.observaciones,
+                    c.anio_fabricacion,
 
-                s.id AS estado_id,
-                s.nombre AS estado,
-                s.nombre AS estado_computadora,
-                s.nombre AS status_nombre,
+                    s.id AS estado_id,
+                    s.nombre AS estado,
+                    s.nombre AS estado_computadora,
+                    s.nombre AS status_nombre,
 
-                p.id AS person_id,
-                p.id AS id_persona,
-                p.nombre AS usuario_actual,
-                p.cedula,
-                p.cargo,
-                p.area,
-                p.email,
-                p.company_id,
+                    p.id AS person_id,
+                    p.id AS id_persona,
+                    p.nombre AS usuario_actual,
+                    p.cedula,
+                    p.cargo,
+                    p.area,
+                    p.email,
+                    p.company_id,
 
-                comp.nombre AS company_nombre
+                    comp.nombre AS company_nombre
 
-            FROM computers c
-            JOIN hardware_specs hs
-                ON c.hardware_spec_id = hs.id
-            JOIN statuses s
-                ON c.estado_id = s.id
-            LEFT JOIN ultima_asignacion ua
-                ON ua.computer_id = c.id
-            LEFT JOIN people p
-                ON p.id = ua.person_id
-            LEFT JOIN companies comp
-                ON comp.id = p.company_id
-            WHERE s.nombre <> 'ELIMINADO'
-            ORDER BY c.numero_serie;
-        """)
-        return cur.fetchall()
+                FROM computers c
+                JOIN hardware_specs hs
+                    ON c.hardware_spec_id = hs.id
+                JOIN statuses s
+                    ON c.estado_id = s.id
+                LEFT JOIN ultima_asignacion ua
+                    ON ua.computer_id = c.id
+                LEFT JOIN people p
+                    ON p.id = ua.person_id
+                LEFT JOIN companies comp
+                    ON comp.id = p.company_id
+                WHERE s.nombre <> 'ELIMINADO'
+                ORDER BY c.numero_serie;
+            """)
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/vista/inventario-general ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al consultar inventario general: {str(e)}")
 
 
 @router.get("/vista/computadora-asignada")
 def computadoras_asignadas():
+    print("GET /equipos/vista/computadora-asignada")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM vw_computadora_asignada")
-        return cur.fetchall()
+        try:
+            cur.execute("SELECT * FROM vw_computadora_asignada")
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/vista/computadora-asignada ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al consultar computadoras asignadas: {str(e)}")
 
 
 @router.get("/vista/accesorios-por-persona/{cedula}")
 def accesorios_por_persona(cedula: str):
+    print(f"GET /equipos/vista/accesorios-por-persona/{cedula}")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT *
-            FROM vw_accesorios_por_persona
-            WHERE cedula = %s
-        """, (cedula,))
-        return cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT
+                    pa.id AS relation_id,
+                    a.id AS accessory_id,
+                    p.id AS person_id,
+                    p.cedula,
+                    p.nombre AS empleado,
+                    at.nombre AS tipo_accesorio,
+                    a.marca,
+                    a.modelo,
+                    a.numero_serie,
+                    a.tipo_propiedad,
+                    pa.fecha_asignacion,
+                    pa.fecha_desasignacion
+                FROM person_accessories pa
+                JOIN people p ON pa.person_id = p.id
+                JOIN accessories a ON pa.accessory_id = a.id
+                JOIN accessory_types at ON a.accessory_type_id = at.id
+                JOIN statuses s ON a.estado_id = s.id
+                WHERE p.cedula = %s
+                  AND pa.activo = TRUE
+                  AND s.nombre <> 'ELIMINADO'
+                ORDER BY at.nombre, a.marca, a.modelo
+            """, (cedula,))
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/vista/accesorios-por-persona/{cedula} ===")
+            print("Cédula recibida:", cedula)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al consultar accesorios por persona: {str(e)}")
 
 
 # =========================
@@ -681,119 +849,176 @@ def accesorios_por_persona(cedula: str):
 # =========================
 @router.get("/catalogos/statuses")
 def get_statuses():
+    print("GET /equipos/catalogos/statuses")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT id, nombre
-            FROM statuses
-            WHERE nombre <> 'ELIMINADO'
-            ORDER BY nombre
-        """)
-        return cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT id, nombre
+                FROM statuses
+                WHERE nombre <> 'ELIMINADO'
+                ORDER BY nombre
+            """)
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/catalogos/statuses ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al obtener statuses: {str(e)}")
 
 
 @router.get("/companies")
 def get_companies():
+    print("GET /equipos/companies")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT c.id, c.nombre
-            FROM companies c
-            JOIN statuses s ON c.status_id = s.id
-            WHERE s.nombre <> 'ELIMINADO'
-            ORDER BY c.nombre
-        """)
-        return cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT c.id, c.nombre
+                FROM companies c
+                JOIN statuses s ON c.status_id = s.id
+                WHERE s.nombre <> 'ELIMINADO'
+                ORDER BY c.nombre
+            """)
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/companies ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al obtener compañías: {str(e)}")
 
 
 @router.get("/people")
 def get_people():
+    print("GET /equipos/people")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT
-                p.id,
-                p.cedula,
-                p.nombre,
-                p.cargo,
-                p.area,
-                p.email,
-                p.company_id,
-                c.nombre AS company_nombre,
-                p.status_id,
-                s.nombre AS status_nombre
-            FROM people p
-            JOIN companies c ON p.company_id = c.id
-            JOIN statuses s ON p.status_id = s.id
-            WHERE s.nombre <> 'ELIMINADO'
-            ORDER BY p.nombre
-        """)
-        return cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT
+                    p.id,
+                    p.cedula,
+                    p.nombre,
+                    p.cargo,
+                    p.area,
+                    p.email,
+                    p.company_id,
+                    c.nombre AS company_nombre,
+                    p.status_id,
+                    s.nombre AS status_nombre
+                FROM people p
+                JOIN companies c ON p.company_id = c.id
+                JOIN statuses s ON p.status_id = s.id
+                WHERE s.nombre <> 'ELIMINADO'
+                ORDER BY p.nombre
+            """)
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/people ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al obtener personas: {str(e)}")
 
 
 @router.get("/hardware")
 def get_hardware():
+    print("GET /equipos/hardware")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT id, tipo_equipo, marca, modelo
-            FROM hardware_specs
-            WHERE status_id <> (SELECT id FROM statuses WHERE nombre = 'ELIMINADO')
-            ORDER BY marca, modelo
-        """)
-        return cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT id, tipo_equipo, marca, modelo
+                FROM hardware_specs
+                WHERE status_id <> (SELECT id FROM statuses WHERE nombre = 'ELIMINADO')
+                ORDER BY marca, modelo
+            """)
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/hardware ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al obtener hardware: {str(e)}")
 
 
 @router.get("/accessory-types")
 def get_accessory_types():
+    print("GET /equipos/accessory-types")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT at.id, at.nombre
-            FROM accessory_types at
-            JOIN statuses s ON at.status_id = s.id
-            WHERE s.nombre <> 'ELIMINADO'
-            ORDER BY at.nombre
-        """)
-        return cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT at.id, at.nombre
+                FROM accessory_types at
+                JOIN statuses s ON at.status_id = s.id
+                WHERE s.nombre <> 'ELIMINADO'
+                ORDER BY at.nombre
+            """)
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/accessory-types ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al obtener tipos de accesorio: {str(e)}")
 
 
 @router.get("/accessories/disponibles")
 def get_accessories_disponibles():
+    print("GET /equipos/accessories/disponibles")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT
-                a.id,
-                at.nombre AS tipo,
-                a.marca,
-                a.modelo,
-                a.numero_serie,
-                a.tipo_propiedad
-            FROM accessories a
-            JOIN statuses s ON a.estado_id = s.id
-            JOIN accessory_types at ON a.accessory_type_id = at.id
-            WHERE s.nombre IN ('DISPONIBLE', 'NUEVO')
-            ORDER BY at.nombre
-        """)
-        return cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT
+                    a.id,
+                    at.nombre AS tipo,
+                    a.marca,
+                    a.modelo,
+                    a.numero_serie,
+                    a.tipo_propiedad
+                FROM accessories a
+                JOIN statuses s ON a.estado_id = s.id
+                JOIN accessory_types at ON a.accessory_type_id = at.id
+                WHERE s.nombre IN ('DISPONIBLE', 'NUEVO')
+                ORDER BY at.nombre
+            """)
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/accessories/disponibles ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al obtener accesorios disponibles: {str(e)}")
 
 
 @router.get("/computers/disponibles")
 def get_computers_disponibles():
+    print("GET /equipos/computers/disponibles")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT
-                c.id,
-                c.numero_serie,
-                hs.tipo_equipo,
-                hs.marca,
-                hs.modelo
-            FROM computers c
-            JOIN statuses s ON c.estado_id = s.id
-            JOIN hardware_specs hs ON c.hardware_spec_id = hs.id
-            WHERE s.nombre IN ('DISPONIBLE', 'NUEVO')
-            ORDER BY c.numero_serie
-        """)
-        return cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT
+                    c.id,
+                    c.numero_serie,
+                    hs.tipo_equipo,
+                    hs.marca,
+                    hs.modelo
+                FROM computers c
+                JOIN statuses s ON c.estado_id = s.id
+                JOIN hardware_specs hs ON c.hardware_spec_id = hs.id
+                WHERE s.nombre IN ('DISPONIBLE', 'NUEVO')
+                ORDER BY c.numero_serie
+            """)
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/computers/disponibles ===")
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al obtener computadoras disponibles: {str(e)}")
 
 
 @router.put("/computers/{serial}/status")
 def change_computer_status(serial: str, data: dict):
+    print(f"PUT /equipos/computers/{serial}/status payload:", data)
     nuevo_estado = data.get("nuevo_estado")
 
     with get_conn() as conn, conn.cursor() as cur:
@@ -830,22 +1055,112 @@ def change_computer_status(serial: str, data: dict):
             raise
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN PUT /equipos/computers/{serial}/status ===")
+            print("Serial recibido:", serial)
+            print("Payload recibido:", data)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al cambiar estado: {str(e)}")
 
 
 @router.get("/accesorios/persona/{cedula}")
 def get_accesorios_persona(cedula: str):
+    print(f"GET /equipos/accesorios/persona/{cedula}")
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT *
-            FROM vw_accesorios_por_persona
-            WHERE cedula = %s
-        """, (cedula,))
-        return cur.fetchall()
+        try:
+            cur.execute("""
+                SELECT
+                    pa.id AS relation_id,
+                    a.id AS accessory_id,
+                    p.id AS person_id,
+                    p.cedula,
+                    p.nombre AS empleado,
+                    at.nombre AS tipo_accesorio,
+                    a.marca,
+                    a.modelo,
+                    a.numero_serie,
+                    a.tipo_propiedad,
+                    pa.fecha_asignacion,
+                    pa.fecha_desasignacion
+                FROM person_accessories pa
+                JOIN people p ON pa.person_id = p.id
+                JOIN accessories a ON pa.accessory_id = a.id
+                JOIN accessory_types at ON a.accessory_type_id = at.id
+                JOIN statuses s ON a.estado_id = s.id
+                WHERE p.cedula = %s
+                  AND pa.activo = TRUE
+                  AND s.nombre <> 'ELIMINADO'
+                ORDER BY at.nombre, a.marca, a.modelo
+            """, (cedula,))
+            return cur.fetchall()
+        except Exception as e:
+            print("=== ERROR EN GET /equipos/accesorios/persona/{cedula} ===")
+            print("Cédula recibida:", cedula)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al obtener accesorios de persona: {str(e)}")
+
+
+@router.put("/unassign/accessory/{accessory_id}")
+def unassign_accessory(accessory_id: int):
+    print(f"PUT /equipos/unassign/accessory/{accessory_id}")
+    with get_conn() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("""
+                SELECT person_id
+                FROM person_accessories
+                WHERE accessory_id = %s
+                  AND activo = TRUE
+                FOR UPDATE
+            """, (accessory_id,))
+            relation = cur.fetchone()
+
+            if not relation:
+                raise HTTPException(status_code=404, detail="El accesorio no tiene una asignacion activa")
+
+            person_id = relation[0]
+
+            cur.execute("""
+                INSERT INTO accessory_history
+                (accessory_id, person_id, tipo_movimiento, fecha_movimiento, usuario_registro)
+                VALUES (%s, %s, 'DEVOLUCION', CURRENT_DATE, 'sistema')
+            """, (accessory_id, person_id))
+
+            cur.execute("""
+                UPDATE person_accessories
+                SET activo = FALSE,
+                    fecha_desasignacion = CURRENT_DATE
+                WHERE accessory_id = %s
+                  AND activo = TRUE
+            """, (accessory_id,))
+
+            cur.execute("""
+                UPDATE accessories
+                SET estado_id = (SELECT id FROM statuses WHERE nombre = 'DISPONIBLE')
+                WHERE id = %s
+            """, (accessory_id,))
+
+            conn.commit()
+            return {"message": "Accesorio liberado correctamente"}
+
+        except HTTPException:
+            conn.rollback()
+            raise
+        except Exception as e:
+            conn.rollback()
+            print("=== ERROR EN PUT /equipos/unassign/accessory/{accessory_id} ===")
+            print("Accessory ID recibido:", accessory_id)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Error al liberar accesorio: {str(e)}")
 
 
 @router.post("/unassign/full/{person_id}")
 def unassign_full(person_id: int):
+    print(f"POST /equipos/unassign/full/{person_id}")
     with get_conn() as conn, conn.cursor() as cur:
         try:
             # ======================
@@ -928,11 +1243,17 @@ def unassign_full(person_id: int):
 
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN POST /equipos/unassign/full/{person_id} ===")
+            print("Person ID recibido:", person_id)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error en desasignación completa: {str(e)}")
 
 
 @router.put("/unassign/computer/{computer_id}")
 def unassign_computer(computer_id: int):
+    print(f"PUT /equipos/unassign/computer/{computer_id}")
     with get_conn() as conn, conn.cursor() as cur:
         try:
             # Cerrar asignación activa
@@ -956,6 +1277,11 @@ def unassign_computer(computer_id: int):
 
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN PUT /equipos/unassign/computer/{computer_id} ===")
+            print("Computer ID recibido:", computer_id)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al liberar computadora: {str(e)}")
 
 
@@ -964,6 +1290,7 @@ def unassign_computer(computer_id: int):
 # =========================
 @router.put("/people/{id}")
 def update_person(id: int, data: dict):
+    print(f"PUT /equipos/people/{id} payload:", data)
     with get_conn() as conn, conn.cursor() as cur:
         try:
             cur.execute("SELECT id FROM people WHERE id = %s", (id,))
@@ -999,11 +1326,18 @@ def update_person(id: int, data: dict):
             raise
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN PUT /equipos/people/{id} ===")
+            print("ID recibido:", id)
+            print("Payload recibido:", data)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al actualizar persona: {str(e)}")
 
 
 @router.put("/hardware/{id}")
 def update_hardware(id: int, data: dict):
+    print(f"PUT /equipos/hardware/{id} payload:", data)
     with get_conn() as conn, conn.cursor() as cur:
         try:
             cur.execute("SELECT id FROM hardware_specs WHERE id = %s", (id,))
@@ -1045,4 +1379,10 @@ def update_hardware(id: int, data: dict):
             raise
         except Exception as e:
             conn.rollback()
+            print("=== ERROR EN PUT /equipos/hardware/{id} ===")
+            print("ID recibido:", id)
+            print("Payload recibido:", data)
+            print("Tipo de error:", type(e).__name__)
+            print("Mensaje:", str(e))
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"Error al actualizar hardware: {str(e)}")
