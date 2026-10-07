@@ -1,0 +1,14 @@
+
+# Secretos y artefactos (auditoria 2026-10-05)
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.zip
+
+# Transcripciones crudas de Codex (los informes .md sí se versionan)
+.orca/reviews/codex-run*.log
+**/.orca/reviews/codex-run*.log
+# Datos personales reales: no van a un repositorio público
+**/sql/002_vista_previa_mantenimientos_2025.csv
