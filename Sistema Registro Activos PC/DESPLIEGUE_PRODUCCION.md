@@ -8,6 +8,11 @@ Servidor de la app: **192.168.20.4** (backend en el puerto 7001, frontend en el 
 - **Faltan** las tablas de impresoras: hay que aplicar la migración 005. El simulacro rellenará 27 impresoras, 11 de ellas detectadas como de color.
 - Hay 2 usuarios (`admin`, `Sistemas`), los dos con la contraseña en texto plano. El backend nuevo los acepta (es compatible) hasta aplicar la migración 004.
 
+## Reportes en Excel (añadidos el 2026-10-13)
+- Botón "Exportar a Excel" en Equipos, Accesorios e Impresoras. El de Impresoras genera las hojas Contadores, Consumo y Lecturas, en el formato del Excel actual.
+- Añade dos endpoints de solo lectura: `GET /impresoras/lecturas` y `GET /equipos/accessories/reporte`. **No necesitan cambios en la BD.** Ya se verificaron en solo lectura contra producción (403 accesorios).
+- Solo hace falta desplegar el backend y el frontend de esta rama. En el servidor, `npm install` instala `exceljs`.
+
 ## Orden de despliegue (respétalo)
 
 ### 0. Respaldo de la BD

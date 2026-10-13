@@ -4,6 +4,7 @@ El consumo de una lectura es el contador menos el de la lectura anterior de la m
 se calcula al leer (LAG), no se almacena."""
 import logging
 from datetime import date
+from typing import Optional
 
 import psycopg2
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -322,6 +323,58 @@ def resumen(meses: int = Query(default=12, ge=1, le=60)):
     except Exception:
         logger.exception("Error en GET /impresoras/resumen")
         raise HTTPException(status_code=500, detail="Error al obtener el resumen de impresoras.")
+
+
+# ---------- reporte de lecturas de todas las impresoras (solo lectura; antes de /{id}) ----------
+_PATRON_PERIODO = r"^\d{4}-(0[1-9]|1[0-2])$"
+
+
+@router.get("/lecturas")
+def reporte_lecturas(desde: Optional[str] = Query(default=None, pattern=_PATRON_PERIODO),
+                     hasta: Optional[str] = Query(default=None, pattern=_PATRON_PERIODO)):
+    """Lecturas con consumo de todas las impresoras no eliminadas, ordenadas por impresora y periodo.
+    El LAG se calcula sobre TODO el histórico de cada impresora y el rango se aplica después, para que
+    la primera lectura del rango conserve su consumo si existe una lectura anterior."""
+    d = _periodo_a_fecha(desde) if desde else None
+    h = _periodo_a_fecha(hasta) if hasta else None
+    if d and h and d > h:
+        raise HTTPException(status_code=422, detail="'desde' no puede ser posterior a 'hasta'.")
+    try:
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(f"""
+                SELECT p.id AS printer_id, c.numero_serie, hs.modelo, co.nombre AS empresa, p.ip_address,
+                       p.hostname, p.area, p.es_color, s.nombre AS estado,
+                       x.periodo, x.fecha_lectura, x.contador_bn, x.contador_color, x.es_reinicio,
+                       {_consumo_sql('x.contador_bn', 'x.prev_bn')} AS consumo_bn,
+                       {_consumo_sql('x.contador_color', 'x.prev_color')} AS consumo_color,
+                       x.registrado_por
+                FROM (
+                    SELECT r.*, LAG(r.contador_bn) OVER w AS prev_bn, LAG(r.contador_color) OVER w AS prev_color
+                    FROM printer_readings r
+                    WINDOW w AS (PARTITION BY r.printer_id ORDER BY r.periodo)
+                ) x
+                JOIN printers p ON p.id = x.printer_id
+                JOIN computers c ON c.id = p.computer_id
+                JOIN hardware_specs hs ON hs.id = c.hardware_spec_id
+                LEFT JOIN statuses s ON s.id = c.estado_id
+                LEFT JOIN companies co ON co.id = p.company_id
+                WHERE COALESCE(s.nombre, '') <> 'ELIMINADO'
+                  AND (%(desde)s::date IS NULL OR x.periodo >= %(desde)s::date)
+                  AND (%(hasta)s::date IS NULL OR x.periodo <= %(hasta)s::date)
+                ORDER BY p.id, x.periodo
+            """, {"desde": d, "hasta": h})
+            return [{
+                "printer_id": f["printer_id"], "numero_serie": f["numero_serie"],
+                "modelo": (f["modelo"] or "").strip(), "empresa": f["empresa"], "ip_address": f["ip_address"],
+                "hostname": f["hostname"], "area": f["area"], "es_color": f["es_color"], "estado": f["estado"],
+                "periodo": _periodo_texto(f["periodo"]), "fecha_lectura": f["fecha_lectura"].isoformat(),
+                "contador_bn": f["contador_bn"], "contador_color": f["contador_color"],
+                "es_reinicio": f["es_reinicio"], "consumo_bn": f["consumo_bn"],
+                "consumo_color": f["consumo_color"], "registrado_por": f["registrado_por"],
+            } for f in cur.fetchall()]
+    except Exception:
+        logger.exception("Error en GET /impresoras/lecturas")
+        raise HTTPException(status_code=500, detail="Error al obtener el reporte de lecturas.")
 
 
 # ---------- lote de lecturas (antes de /{id}) ----------

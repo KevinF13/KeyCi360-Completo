@@ -71,6 +71,17 @@ Usa las mismas dependencias que `/equipos`: GET lo puede hacer cualquier usuario
 | DELETE | `/impresoras/lecturas/{lectura_id}` | | 204 |
 | POST | `/impresoras/lecturas/lote` | `{lecturas:[{printer_id, periodo, fecha_lectura, contador_bn, contador_color, es_reinicio?, observaciones?}], modo:"validar"\|"aplicar"}` | 200 `{ok, creadas, validas, errores:[{indice, printer_id, periodo, mensaje}]}`: `creadas` = escritas (0 en validar o si se rechaza), `validas` = las que pasaron la validación. Es atómico: con un solo error no se inserta nada. `validar` nunca escribe. |
 | GET | `/impresoras/resumen` | `?meses=12` | `ResumenImpresoras` |
+| GET | `/impresoras/lecturas` | `?desde=YYYY-MM&hasta=YYYY-MM` (ambos opcionales; formato inválido o `desde` > `hasta` → 422) | `[LecturaReporte]` ordenada por impresora y periodo. Solo lectura (cualquier usuario autenticado). Excluye impresoras ELIMINADO. El consumo usa el LAG sobre TODO el histórico de cada impresora y el rango se aplica después (la primera lectura del rango conserva su consumo si hay una anterior). Declarada antes de `/{id}`. |
+| GET | `/equipos/accessories/reporte` | | `[AccesorioReporte]` ordenada por tipo, marca, modelo, serie. Solo lectura. Todos los accesorios no ELIMINADO (disponibles y asignados). `asignado` sale de `person_accessories.activo = TRUE` (si hubiera más de una activa, la más reciente). Declarada antes de `/accessories/disponibles`. |
+
+```ts
+// Reportes para exportar a Excel (frontend: utils/exportarExcel.js y utils/reportesExcel.js)
+LecturaReporte = { printer_id, numero_serie, modelo, empresa /* o null */, ip_address, hostname, area, es_color,
+  estado /* nombre en statuses */, periodo:"YYYY-MM", fecha_lectura:"YYYY-MM-DD", contador_bn, contador_color,
+  es_reinicio, consumo_bn: number|null, consumo_color: number|null, registrado_por }
+AccesorioReporte = { id, tipo, marca, modelo, numero_serie, tipo_propiedad, asignado: boolean,
+  asignado_a: string|null, cedula: string|null, empresa: string|null, fecha_asignacion: "YYYY-MM-DD"|null }
+```
 
 ```ts
 Impresora = { id, computer_id, numero_serie, marca, modelo, tipo_propiedad, tarifa_mensual, estado /* nombre en statuses */,

@@ -1050,6 +1050,50 @@ def get_accessory_types():
             raise HTTPException(status_code=500, detail="Error al obtener tipos de accesorio.")
 
 
+@router.get("/accessories/reporte")
+def get_accessories_reporte():
+    """Todos los accesorios no eliminados con su asignación vigente (person_accessories.activo). Solo lectura."""
+    logger.debug("GET /equipos/accessories/reporte")
+    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        try:
+            cur.execute("""
+                SELECT
+                    a.id,
+                    at.nombre AS tipo,
+                    a.marca,
+                    a.modelo,
+                    a.numero_serie,
+                    a.tipo_propiedad,
+                    (asg.person_id IS NOT NULL) AS asignado,
+                    asg.nombre AS asignado_a,
+                    asg.cedula,
+                    asg.empresa,
+                    asg.fecha_asignacion
+                FROM accessories a
+                JOIN statuses s ON a.estado_id = s.id
+                JOIN accessory_types at ON a.accessory_type_id = at.id
+                LEFT JOIN LATERAL (
+                    SELECT pa.person_id, pa.fecha_asignacion, p.nombre, p.cedula, co.nombre AS empresa
+                    FROM person_accessories pa
+                    JOIN people p ON p.id = pa.person_id
+                    LEFT JOIN companies co ON co.id = p.company_id
+                    WHERE pa.accessory_id = a.id AND pa.activo = TRUE
+                    ORDER BY pa.fecha_asignacion DESC, pa.id DESC
+                    LIMIT 1
+                ) asg ON TRUE
+                WHERE s.nombre <> 'ELIMINADO'
+                ORDER BY at.nombre, a.marca, a.modelo, a.numero_serie, a.id
+            """)
+            filas = cur.fetchall()
+            for f in filas:
+                if f["fecha_asignacion"] is not None:
+                    f["fecha_asignacion"] = f["fecha_asignacion"].isoformat()
+            return filas
+        except Exception:
+            logger.exception("Error en GET /equipos/accessories/reporte")
+            raise HTTPException(status_code=500, detail="Error al obtener el reporte de accesorios.")
+
+
 @router.get("/accessories/disponibles")
 def get_accessories_disponibles():
     logger.debug("GET /equipos/accessories/disponibles")
